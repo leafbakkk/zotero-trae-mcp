@@ -622,18 +622,30 @@ def _web_delete_item(key):
 # ---------------------------------------------------------------- 查重
 
 def _dup_check_by_doi(doi):
-    """本地库中是否已存在带此 DOI 的条目"""
+    """本地库查 DOI 是否存在；兜底查 Web API（处理 Web 写入后本地未同步的时序问题）"""
     if not doi:
         return None
+    # 本地 API 精确匹配
     items = _get("/api/users/0/items", {"q": doi, "format": "json", "limit": 10}) or []
     for it in items:
         if doi.upper() == (it.get("data", {}).get("DOI") or "").upper():
             return it
+    # Web API 兜底
+    try:
+        key = _get_web_api_key()
+        url = f"{ZOTERO_WEB}/users/{_get_user_id() or '0'}/items?filter=doi:{urllib.parse.quote(doi)}&format=json&limit=1"
+        req = urllib.request.Request(url, headers={"Zotero-API-Key": key, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            witems = json.loads(r.read().decode("utf-8"))
+        if witems:
+            return witems[0]  # Web API 返回的 item 结构略有不同，但有 key 字段
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
 def _dup_check_by_title(title):
-    """本地库中是否存在标题高度相似的条目（模糊匹配前 80 字符归一化）"""
+    """本地库查标题是否高度相似；兜底查 Web API"""
     if not title:
         return None
     norm = re.sub(r"[\s\-_:.,!?']+", "", title.lower())[:80]
@@ -643,20 +655,46 @@ def _dup_check_by_title(title):
         tn = re.sub(r"[\s\-_:.,!?']+", "", t.lower())[:80]
         if tn == norm or (norm and (norm in tn or tn in norm)):
             return it
+    # Web API 兜底（title 搜索）
+    try:
+        key = _get_web_api_key()
+        url = f"{ZOTERO_WEB}/users/{_get_user_id() or '0'}/items?format=json&q={urllib.parse.quote(title[:30])}&limit=30"
+        req = urllib.request.Request(url, headers={"Zotero-API-Key": key, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            witems = json.loads(r.read().decode("utf-8"))
+        for it in witems:
+            t = (it.get("data", {}).get("title") or "")
+            tn = re.sub(r"[\s\-_:.,!?']+", "", t.lower())[:80]
+            if tn == norm or (norm and (norm in tn or tn in norm)):
+                return it
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
 def _dup_check_by_arxiv(arxiv_id):
-    """本地库中是否已存在带此 arXiv ID 的条目"""
+    """本地库 + Web API 兜底查重 arXiv ID"""
     if not arxiv_id:
         return None
+    # 本地
     items = _get("/api/users/0/items", {"q": arxiv_id, "format": "json", "limit": 10}) or []
     for it in items:
         d = it.get("data", {})
-        if arxiv_id.upper() in (d.get("url") or "").upper():
+        if arxiv_id.upper() in (d.get("url") or "").upper() or arxiv_id.upper() in (d.get("extra") or "").upper():
             return it
-        if arxiv_id.upper() in (d.get("extra") or "").upper():
-            return it
+    # Web 兜底
+    try:
+        key = _get_web_api_key()
+        url = f"{ZOTERO_WEB}/users/{_get_user_id() or '0'}/items?format=json&q={urllib.parse.quote(arxiv_id)}&limit=10"
+        req = urllib.request.Request(url, headers={"Zotero-API-Key": key, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            witems = json.loads(r.read().decode("utf-8"))
+        for it in witems:
+            d = it.get("data", {})
+            if arxiv_id.upper() in (d.get("url") or "").upper() or arxiv_id.upper() in (d.get("extra") or "").upper():
+                return it
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
@@ -725,9 +763,9 @@ def _fetch_arxiv(arxiv_id):
     for name in _author_names(entry_block):
         parts = name.split()
         if len(parts) >= 2:
-            creators.append({"firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
+            creators.append({"creatorType": "author", "firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
         else:
-            creators.append({"lastName": name})
+            creators.append({"creatorType": "author", "lastName": name})
     out = {
         "itemType": item_type,
         "title": title,
@@ -768,9 +806,9 @@ def _fetch_isbn(isbn):
         name = a.get("name", "")
         parts = name.split()
         if len(parts) >= 2:
-            creators.append({"firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
+            creators.append({"creatorType": "author", "firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
         elif len(parts) == 1:
-            creators.append({"lastName": parts[0]})
+            creators.append({"creatorType": "author", "lastName": parts[0]})
     publish_date = book.get("publish_date", "")[:10]
     publishers = book.get("publishers", [])
     pub_name = publishers[0].get("name", "") if publishers else ""
@@ -815,13 +853,20 @@ def _crossref_to_zotero(msg):
     out["title"] = title[0] if isinstance(title, list) else (title or "")
     out["DOI"] = msg.get("DOI", "")
     out["url"] = msg.get("URL", "") or out.get("DOI") and f"https://doi.org/{out['DOI']}"
-    # 作者
+    # 作者 —— 必须带 creatorType（Zotero Web API 硬性要求）
     creators = []
     for a in msg.get("author", []):
-        if a.get("ORCID"):
-            creators.append({"firstName": a.get("given", ""), "lastName": a.get("family", "")})
-        else:
-            creators.append({"firstName": a.get("given", ""), "lastName": a.get("family", "")})
+        creators.append({
+            "creatorType": "author",
+            "firstName": a.get("given", ""),
+            "lastName": a.get("family", ""),
+        })
+    for a in msg.get("editor", []):
+        creators.append({
+            "creatorType": "editor",
+            "firstName": a.get("given", ""),
+            "lastName": a.get("family", ""),
+        })
     out["creators"] = creators
     # 日期
     published = msg.get("published-print") or msg.get("published-online") or msg.get("created") or {}
@@ -881,7 +926,7 @@ def _resolve_collection_key(collection_path):
 def _standardize_payload(payload):
     """将外部提供的条目元数据归一化为 Zotero itemTemplate 格式"""
     out = dict(payload)
-    # 确保 creators 是 [{firstName, lastName}] 或 [{name}]
+    # 确保 creators 是 [{creatorType, firstName, lastName}] 或 [{creatorType, name}]
     creators = out.get("creators") or []
     normalized = []
     for c in creators:
@@ -889,14 +934,15 @@ def _standardize_payload(payload):
             # 纯字符串：尝试拆分
             parts = c.split()
             if len(parts) >= 2:
-                normalized.append({"firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
+                normalized.append({"creatorType": "author", "firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
             else:
-                normalized.append({"lastName": c})
+                normalized.append({"creatorType": "author", "lastName": c})
         elif isinstance(c, dict):
             if c.get("name"):
-                normalized.append({"name": c["name"]})
+                normalized.append({"creatorType": "author", "name": c["name"]})
             else:
                 normalized.append({
+                    "creatorType": c.get("creatorType") or "author",
                     "firstName": c.get("firstName", ""),
                     "lastName": c.get("lastName", ""),
                 })
