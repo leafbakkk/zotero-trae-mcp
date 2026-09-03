@@ -955,10 +955,64 @@ def _standardize_payload(payload):
 
 # ---------------------------------------------------------------- 对外入口函数
 
-def add_item(raw_payload, collection=None, auto_tag=True, extra_tags=None):
+# ---------------------------------------------------------------- 用户评级（Zotero 用⭐标签实现）
+
+RATING_STARS = {
+    0: "⭐", 1: "⭐⭐", 2: "⭐⭐⭐", 3: "⭐⭐⭐⭐", 4: "⭐⭐⭐⭐⭐", 5: "⭐⭐⭐⭐⭐",
+}
+
+def _rating_to_tag(rating):
+    """0-5 → ⭐标签。Zotero 0星=⭐, 1星=⭐⭐, ..., 5星=⭐⭐⭐⭐⭐"""
+    if not (0 <= rating <= 5):
+        return None
+    return RATING_STARS[rating]
+
+
+def _find_rating_tag(tag_names):
+    """从标签列表中找出评级标签，返回 rating 值（0-5）或 None"""
+    for t in tag_names:
+        if t and all(c == "⭐" for c in t) and 1 <= len(t) <= 5:
+            # ⭐ = 0星, ⭐⭐ = 1星, ..., ⭐⭐⭐⭐⭐ = 4或5星（Zotero 用 1-5 星）
+            return len(t) - 1
+    return None
+
+
+# ---------------------------------------------------------------- 辅助函数
+
+def _apply_user_meta(payload, rating=-1, notes="", extra=""):
+    """将用户指定的评级/简记/extra 注入 payload"""
+    if rating is not None and 0 <= rating <= 5:
+        # 先移除旧的评级标签（如果有）
+        existing_tags = payload.get("tags", [])
+        tag_names = [t.get("tag", "") if isinstance(t, dict) else t for t in existing_tags]
+        old_rating = _find_rating_tag(tag_names)
+        if old_rating is not None:
+            old_tag = RATING_STARS.get(old_rating, "")
+            payload["tags"] = [t for t in existing_tags
+                               if (t.get("tag", "") if isinstance(t, dict) else t) != old_tag]
+        # 加新评级标签
+        rating_tag = _rating_to_tag(rating)
+        payload["tags"].append({"tag": rating_tag})
+    if notes:
+        # 追加到 abstractNote（Crossref/arXiv 可能已有摘要）
+        existing = payload.get("abstractNote", "")
+        if existing:
+            payload["abstractNote"] = existing + "\n\n---\n" + notes
+        else:
+            payload["abstractNote"] = notes
+    if extra:
+        payload["extra"] = extra
+    return payload
+
+
+def add_item(raw_payload, collection=None, auto_tag=True, extra_tags=None,
+             rating=-1, notes="", extra=""):
     """通用写入：AI 直接提供元数据，去重后写入 Zotero。
 
     raw_payload 支持 Zotero itemTemplate 字段（itemType, title, creators, DOI, date, ...）。
+    rating 0-5 评级（-1 表示不设置）。
+    notes 简记/备注文本，会追加到 abstractNote 字段。
+    extra Zotero extra 字段值。
     """
     payload = _standardize_payload(raw_payload)
     if not payload.get("title"):
@@ -983,6 +1037,7 @@ def add_item(raw_payload, collection=None, auto_tag=True, extra_tags=None):
             cites = 0
 
     payload = _apply_tags(payload, extra_tags=extra_tags, auto_tag=auto_tag, is_hot=cites >= HOT_CITES)
+    payload = _apply_user_meta(payload, rating=rating, notes=notes, extra=extra)
     collection_key = _resolve_collection_key(collection) if collection else None
 
     result = _web_post_items([payload], collection_key=collection_key)
@@ -999,7 +1054,8 @@ def add_item(raw_payload, collection=None, auto_tag=True, extra_tags=None):
     }
 
 
-def add_paper_by_doi(doi, collection=None, auto_tag=True):
+def add_paper_by_doi(doi, collection=None, auto_tag=True, extra_tags=None,
+                     rating=-1, notes="", extra=""):
     """按 DOI 从 Crossref 抓取元数据，查重后写入"""
     doi = doi.strip().lstrip("doi:")
     dup = _dup_check_by_doi(doi)
@@ -1007,10 +1063,12 @@ def add_paper_by_doi(doi, collection=None, auto_tag=True):
         return {"added": False, "duplicate": True, "existing_key": dup["key"],
                 "message": f"本地库已存在 DOI={doi} 的条目（key={dup['key']}），跳过写入"}
     payload, cites = _fetch_doi(doi)
-    return add_item(payload, collection=collection, auto_tag=auto_tag)
+    return add_item(payload, collection=collection, auto_tag=auto_tag,
+                    extra_tags=extra_tags, rating=rating, notes=notes, extra=extra)
 
 
-def add_paper_by_arxiv(arxiv_id, collection=None, auto_tag=True):
+def add_paper_by_arxiv(arxiv_id, collection=None, auto_tag=True, extra_tags=None,
+                       rating=-1, notes="", extra=""):
     """按 arXiv ID 抓取元数据（优先走 DOI→Crossref，兜底 arXiv 自身），查重后写入"""
     arxiv_id = arxiv_id.strip()
     dup = _dup_check_by_arxiv(arxiv_id)
@@ -1018,10 +1076,12 @@ def add_paper_by_arxiv(arxiv_id, collection=None, auto_tag=True):
         return {"added": False, "duplicate": True, "existing_key": dup["key"],
                 "message": f"本地库已存在 arXiv:{arxiv_id} 的条目，跳过写入"}
     payload, cites, _pdf_url = _fetch_arxiv(arxiv_id)
-    return add_item(payload, collection=collection, auto_tag=auto_tag)
+    return add_item(payload, collection=collection, auto_tag=auto_tag,
+                    extra_tags=extra_tags, rating=rating, notes=notes, extra=extra)
 
 
-def add_book_by_isbn(isbn, collection=None, auto_tag=True):
+def add_book_by_isbn(isbn, collection=None, auto_tag=True, extra_tags=None,
+                     rating=-1, notes="", extra=""):
     """按 ISBN 从 Open Library 抓取元数据，查重后写入"""
     isbn = re.sub(r"[\s-]", "", isbn).strip()
     dup = None
@@ -1034,10 +1094,12 @@ def add_book_by_isbn(isbn, collection=None, auto_tag=True):
         return {"added": False, "duplicate": True, "existing_key": dup["key"],
                 "message": f"本地库已存在 ISBN={isbn} 的条目，跳过写入"}
     payload, _ = _fetch_isbn(isbn)
-    return add_item(payload, collection=collection, auto_tag=auto_tag)
+    return add_item(payload, collection=collection, auto_tag=auto_tag,
+                    extra_tags=extra_tags, rating=rating, notes=notes, extra=extra)
 
 
-def add_paper_by_title(title, collection=None, auto_tag=True):
+def add_paper_by_title(title, collection=None, auto_tag=True, extra_tags=None,
+                       rating=-1, notes="", extra=""):
     """按标题搜索 Crossref 自动匹配最相关条目，查重后写入"""
     title = title.strip()
     if not title:
@@ -1047,7 +1109,8 @@ def add_paper_by_title(title, collection=None, auto_tag=True):
         return {"added": False, "duplicate": True, "existing_key": dup["key"],
                 "message": f"本地库已存在标题「{title}」的条目（key={dup['key']}），跳过写入"}
     payload, cites = _fetch_by_title(title)
-    return add_item(payload, collection=collection, auto_tag=auto_tag)
+    return add_item(payload, collection=collection, auto_tag=auto_tag,
+                    extra_tags=extra_tags, rating=rating, notes=notes, extra=extra)
 
 
 def attach_pdf_to_item(pdf_path, item_key):
@@ -1058,3 +1121,146 @@ def attach_pdf_to_item(pdf_path, item_key):
     if not item:
         raise ZoteroError(f"条目 {item_key} 不存在")
     return _web_upload_file(item_key, pdf_path)
+
+
+# ---------------------------------------------------------------- 更新已有条目（受限）
+
+def _web_get_item(key):
+    """从 Web API 读取条目完整数据（用于更新前的合并）"""
+    key_api = _require_web_key()
+    uid = _get_user_id() or "0"
+    url = f"{ZOTERO_WEB}/users/{uid}/items/{key}?format=json"
+    req = urllib.request.Request(url, headers={"Zotero-API-Key": key_api, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise ZoteroError(f"读取条目 {key} 失败 HTTP {e.code}") from e
+    except Exception as e:  # noqa: BLE001
+        raise ZoteroError(f"读取条目 {key} 失败: {e}") from e
+
+
+def _web_patch_item(key, patch_data):
+    """PATCH 更新条目元数据（受限：只改标签/评级/简记/extra）。
+    Zotero Web API PATCH 格式：{"data": {...}, "version": N}（version 是顶层字段）。"""
+    key_api = _require_web_key()
+    uid = _get_user_id() or "0"
+    url = f"{ZOTERO_WEB}/users/{uid}/items/{key}?format=json"
+
+    # 先读当前 version
+    current = _web_get_item(key)
+    current_version = current.get("version", 0) if current else 0
+
+    # PATCH 格式：{"data": {...要改的字段...}, "version": N}
+    # version 放顶层，data 放实际要改的字段
+    body_obj = {
+        "data": patch_data,
+        "version": current_version,
+    }
+
+    body = json.dumps(body_obj, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="PATCH",
+        headers={
+            "Zotero-API-Key": key_api,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read().decode("utf-8")
+            if raw.strip():
+                return json.loads(raw)
+            return {"ok": True, "key": key}
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        raise ZoteroError(f"更新条目 HTTP {e.code}: {detail or e.reason}") from e
+    except urllib.error.URLError as e:
+        raise ZoteroError(f"无法连接 Zotero Web API：{e.reason}") from e
+
+
+def update_item_meta(item_key, add_tags=None, remove_tags=None, rating=-1,
+                     notes="", extra="", notes_mode="append"):
+    """更新已有条目的元数据（标签/评级/简记/extra），核心元数据不可改。
+
+    安全边界：只改 tags / abstractNote / extra；
+    不允许修改 itemType / title / creators / DOI / date / publicationTitle 等核心字段。
+    评级通过 ⭐⭐⭐⭐⭐ 标签实现（Zotero 桌面端惯例）。
+    """
+    add_tags = add_tags or []
+    remove_tags = remove_tags or []
+
+    # 读取当前条目
+    current = _web_get_item(item_key)
+    if not current:
+        raise ZoteroError(f"条目 {item_key} 不存在（Web API 404）")
+
+    # Web API 返回的 current 结构：顶层有 tags / version，data 里也有 tags
+    # PATCH 只需要 data 里的字段
+    current_data = current.get("data", current)
+
+    patch = {}
+    changes = []
+
+    # --- 标签合并 ---
+    current_tags = current_data.get("tags") or []
+    tag_names = {t.get("tag", "") for t in current_tags if isinstance(t, dict)}
+
+    # 先处理评级标签的替换
+    if 0 <= rating <= 5:
+        old_rating = _find_rating_tag(tag_names)
+        if old_rating is not None:
+            old_tag = RATING_STARS.get(old_rating, "")
+            current_tags = [t for t in current_tags
+                            if t.get("tag", "") != old_tag]
+            tag_names = {t.get("tag", "") for t in current_tags if isinstance(t, dict)}
+        new_rating_tag = _rating_to_tag(rating)
+        current_tags.append({"tag": new_rating_tag})
+        changes.append(f"rating: {rating} ({new_rating_tag})")
+
+    # 处理 remove_tags
+    if remove_tags:
+        current_tags = [t for t in current_tags if t.get("tag") not in set(remove_tags)]
+        changes.append(f"remove tags: {remove_tags}")
+
+    # 处理 add_tags（排除已存在的）
+    if add_tags:
+        new_tags = [{"tag": t} for t in add_tags if t not in tag_names]
+        current_tags = current_tags + new_tags
+        changes.append(f"add tags: {add_tags}")
+
+    patch["tags"] = current_tags
+
+    # --- 简记 ---
+    if notes:
+        existing_notes = current_data.get("abstractNote", "")
+        if notes_mode == "replace":
+            patch["abstractNote"] = notes
+            changes.append("notes: replaced")
+        else:
+            separator = "\n\n---\n" if existing_notes else ""
+            patch["abstractNote"] = existing_notes + separator + notes
+            changes.append("notes: appended")
+
+    # --- extra ---
+    if extra:
+        patch["extra"] = extra
+        changes.append("extra: set")
+
+    if not changes:
+        return {"updated": False, "message": "没有任何要更新的内容"}
+
+    result = _web_patch_item(item_key, patch)
+    return {
+        "updated": True,
+        "key": item_key,
+        "changes": changes,
+        "web_key_configured": bool(_get_web_api_key()),
+    }

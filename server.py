@@ -234,54 +234,110 @@ def open_pdf_in_zotero(key_or_citekey: str) -> str:
 # ---------------------------------------------------------------- 写入链路
 
 @mcp.tool()
-def add_paper_by_doi(doi: str, collection: str = "", auto_tag: bool = True) -> str:
+def add_paper_by_doi(
+    doi: str,
+    collection: str = "",
+    auto_tag: bool = True,
+    extra_tags: str = "",
+    rating: int = -1,
+    notes: str = "",
+    extra: str = "",
+) -> str:
     """按 DOI 从 Crossref 自动抓取元数据，查重后写入 Zotero。
 
     collection 指定分类路径（如 '硕士论文/CSS中的…'），不填则写入根目录。
     auto_tag=True 时自动打 #来自Agent 和（被引>1000 时）#🔥。
-    写入需要 ZOTERO_API_KEY 环境变量（Zotero Web API），未配置会返回明确指引。
+    extra_tags 逗号分隔，额外添加的标签。
+    rating 0-5 评级（-1 表示不设置）。
+    notes 简记/备注文本，会写入条目的 abstractNote 字段。
+    extra Zotero extra 字段（键值对 JSON 或纯文本）。
     """
     try:
-        return _out(zc.add_paper_by_doi(doi, collection=collection or None, auto_tag=auto_tag))
+        return _out(zc.add_paper_by_doi(
+            doi, collection=collection or None, auto_tag=auto_tag,
+            extra_tags=_parse_tags(extra_tags), rating=rating, notes=notes, extra=extra,
+        ))
     except ZoteroError as e:
         return _err(e)
 
 
 @mcp.tool()
-def add_paper_by_arxiv(arxiv_id: str, collection: str = "", auto_tag: bool = True) -> str:
+def add_paper_by_arxiv(
+    arxiv_id: str,
+    collection: str = "",
+    auto_tag: bool = True,
+    extra_tags: str = "",
+    rating: int = -1,
+    notes: str = "",
+    extra: str = "",
+) -> str:
     """按 arXiv ID 抓取元数据（优先 DOI→Crossref，兜底 arXiv 自身），查重后写入 Zotero。
 
     arxiv_id 可写 '2301.12345' 或 'arXiv:2301.12345'。
-    collection / auto_tag 同 add_paper_by_doi。
+    其他参数同 add_paper_by_doi。
     """
     try:
-        return _out(zc.add_paper_by_arxiv(arxiv_id, collection=collection or None, auto_tag=auto_tag))
+        return _out(zc.add_paper_by_arxiv(
+            arxiv_id, collection=collection or None, auto_tag=auto_tag,
+            extra_tags=_parse_tags(extra_tags), rating=rating, notes=notes, extra=extra,
+        ))
     except ZoteroError as e:
         return _err(e)
 
 
 @mcp.tool()
-def add_book_by_isbn(isbn: str, collection: str = "", auto_tag: bool = True) -> str:
+def add_book_by_isbn(
+    isbn: str,
+    collection: str = "",
+    auto_tag: bool = True,
+    extra_tags: str = "",
+    rating: int = -1,
+    notes: str = "",
+    extra: str = "",
+) -> str:
     """按 ISBN 从 Open Library 自动抓取元数据，查重后写入 Zotero。
 
     isbn 可带空格/短横线（如 '978-7-100-12345-6'），会自动归一化。
+    其他参数同 add_paper_by_doi。
     """
     try:
-        return _out(zc.add_book_by_isbn(isbn, collection=collection or None, auto_tag=auto_tag))
+        return _out(zc.add_book_by_isbn(
+            isbn, collection=collection or None, auto_tag=auto_tag,
+            extra_tags=_parse_tags(extra_tags), rating=rating, notes=notes, extra=extra,
+        ))
     except ZoteroError as e:
         return _err(e)
 
 
 @mcp.tool()
-def add_paper_by_title(title: str, collection: str = "", auto_tag: bool = True) -> str:
+def add_paper_by_title(
+    title: str,
+    collection: str = "",
+    auto_tag: bool = True,
+    extra_tags: str = "",
+    rating: int = -1,
+    notes: str = "",
+    extra: str = "",
+) -> str:
     """按论文标题在 Crossref 自动搜索匹配最相关条目，查重后写入 Zotero。
 
     标题越长匹配越准；返回结果带 citations 字段显示被引数。
+    其他参数同 add_paper_by_doi。
     """
     try:
-        return _out(zc.add_paper_by_title(title, collection=collection or None, auto_tag=auto_tag))
+        return _out(zc.add_paper_by_title(
+            title, collection=collection or None, auto_tag=auto_tag,
+            extra_tags=_parse_tags(extra_tags), rating=rating, notes=notes, extra=extra,
+        ))
     except ZoteroError as e:
         return _err(e)
+
+
+def _parse_tags(s: str):
+    """逗号分隔标签字符串 → list[str]"""
+    if not s:
+        return []
+    return [t.strip() for t in s.split(",") if t.strip()]
 
 
 @mcp.tool()
@@ -294,6 +350,9 @@ def add_item(
     collection: str = "",
     auto_tag: bool = True,
     extra_tags: str = "",
+    rating: int = -1,
+    notes: str = "",
+    extra: str = "",
     **kwargs,
 ) -> str:
     """通用写入：AI 直接提供条目元数据，查重后写入 Zotero。
@@ -305,25 +364,27 @@ def add_item(
     item_type 可选值：journalArticle / book / bookSection / conferencePaper / preprint /
     thesis / report / dataset / letter / note / artwork 等。
     extra_tags 逗号分隔，额外添加的标签。
+    rating 0-5 评级（-1 表示不设置）。
+    notes 简记/备注文本，会写入条目的 abstractNote 字段。
+    extra Zotero extra 字段（键值对 JSON 或纯文本）。
+    kwargs 支持 publicationTitle / volume / issue / pages / publisher / url / language / ISBN 等。
     """
+    import re as _re
     # 解析 creators 字符串 → Zotero 格式
     creator_list = []
     if creators:
-        # 支持 "王弘睿, 张三" / "Last, First & Last, First"
-        import re as _re
-        for seg in _re.split(r"\s*&\s*|\s*;\s*|\s*,\s*(?=[^,]+$)", creators):
+        for seg in _re.split(r"\s*&\s*|\s*;\s*", creators):
             seg = seg.strip()
             if not seg:
                 continue
             parts = seg.split()
             if "," in seg:
-                # "Last, First"
                 last, first = seg.split(",", 1)
-                creator_list.append({"firstName": first.strip(), "lastName": last.strip()})
+                creator_list.append({"creatorType": "author", "firstName": first.strip(), "lastName": last.strip()})
             elif len(parts) >= 2:
-                creator_list.append({"firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
+                creator_list.append({"creatorType": "author", "firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
             else:
-                creator_list.append({"lastName": seg})
+                creator_list.append({"creatorType": "author", "lastName": seg})
 
     payload = {
         "itemType": item_type,
@@ -334,19 +395,20 @@ def add_item(
         payload["DOI"] = doi
     if date:
         payload["date"] = date
-    # kwargs 兜底（publicationTitle, url, abstractNote, publisher, ISBN, ...）
+    # kwargs 兜底
     for k, v in kwargs.items():
         if v is not None and v != "" and k in {
-            "publicationTitle", "url", "abstractNote", "publisher", "ISBN",
-            "extra", "edition", "volume", "issue", "pages", "series",
+            "publicationTitle", "url", "publisher", "ISBN",
+            "edition", "volume", "issue", "pages", "series",
             "seriesNumber", "place", "numPages", "language",
         }:
             payload[k] = v
-    extra = [t.strip() for t in extra_tags.split(",") if t.strip()] if extra_tags else []
 
     try:
-        return _out(zc.add_item(payload, collection=collection or None,
-                                  auto_tag=auto_tag, extra_tags=extra))
+        return _out(zc.add_item(
+            payload, collection=collection or None, auto_tag=auto_tag,
+            extra_tags=_parse_tags(extra_tags), rating=rating, notes=notes, extra=extra,
+        ))
     except ZoteroError as e:
         return _err(e)
 
@@ -359,6 +421,42 @@ def attach_pdf_to_item(pdf_path: str, item_key: str) -> str:
     """
     try:
         return _out(zc.attach_pdf_to_item(pdf_path, item_key))
+    except ZoteroError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_item_meta(
+    item_key: str,
+    add_tags: str = "",
+    remove_tags: str = "",
+    rating: int = -1,
+    notes: str = "",
+    extra: str = "",
+    notes_mode: str = "append",
+) -> str:
+    """更新已有条目的元数据（标签/评级/简记/extra），核心元数据不可改。
+
+    item_key 传 8 位 item key（可先 get_item 拿到）。
+    add_tags 逗号分隔，要追加的标签（已存在的会跳过）。
+    remove_tags 逗号分隔，要移除的标签。
+    rating 0-5 新评级（-1 表示不改）。
+    notes 简记/备注文本。
+    notes_mode: 'append' 追加到现有备注末尾 / 'replace' 替换整个备注。
+    extra Zotero extra 字段新值（传入则整体替换）。
+
+    安全边界：仅改标签、评级、简记、extra、收藏状态；不可改核心元数据（标题/作者/DOI 等）。
+    """
+    try:
+        return _out(zc.update_item_meta(
+            item_key,
+            add_tags=_parse_tags(add_tags),
+            remove_tags=_parse_tags(remove_tags),
+            rating=rating,
+            notes=notes,
+            extra=extra,
+            notes_mode=notes_mode,
+        ))
     except ZoteroError as e:
         return _err(e)
 
