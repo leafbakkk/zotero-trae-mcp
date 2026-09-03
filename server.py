@@ -8,8 +8,12 @@ Phase 1：读链路 + 可视化选择器 + Zotero 跳转（11 个工具）
   选择器在 Trae 内置网页预览组件中打开，不调用系统浏览器；支持勾选批量复制 citekey/文中注
 - 跳：open_in_zotero / open_pdf_in_zotero（zotero:// URL Scheme）
 - 检：health_check
-Phase 2（规划中）：按 DOI/arXiv/ISBN 新增条目，自动查重、打 #来自Agent、被引>1000 打 #🔥；
-不提供任何修改/删除已有条目的工具。
+Phase 2：写入链路（6 个工具）
+- add_paper_by_doi / add_paper_by_arxiv / add_book_by_isbn / add_paper_by_title
+- add_item（AI 直接给元数据）+ attach_pdf_to_item（PDF 附件导入）
+- 自动查重（本地库已有则跳过）、自动打 #来自Agent（可关）、被引>1000 打 #🔥
+- 写入走 Zotero Web API，需要 ZOTERO_API_KEY 环境变量
+- 严禁修改或删除已有条目；仅新增
 
 运行方式（stdio）：python server.py
 """
@@ -26,13 +30,19 @@ from zotero_client import ZoteroError
 mcp = FastMCP(
     "zotero",
     instructions=(
-        "Zotero 文献库访问工具集（只读阶段）。"
+        "Zotero 文献库访问工具集（读+写）。"
         "用户是社会学研究生，文献库 1000+ 条，装有 Better BibTeX。"
         "常用路径：用户想交互式找文献时调用 pick_item 弹出可视化搜索框；"
         "需要全文时先 get_item 或 pick_item 拿到 key，再 read_pdf 读 PDF；"
         "用户提到 Zotero 分类/folder 路径时用 read_collection（如 '硕士论文/CSS中的…'）。"
         "条目标识支持 item key（8 位）、Better BibTeX citekey、DOI 三种形式。"
-        "注意：严禁修改或删除 Zotero 中已有条目；若用户给的是 citekey（形如 simonsLarge2026）直接传给工具即可。"
+        "写入链路：add_paper_by_doi / add_paper_by_arxiv / add_book_by_isbn / add_paper_by_title 自动联网抓取元数据；"
+        "add_item 接收 AI 直接生成的 Zotero itemTemplate 元数据（用户在对话里口述/给 PDF 等）；"
+        "attach_pdf_to_item 将本地 PDF 作为附件导入已有条目。"
+        "所有 add_* 工具支持 collection 参数指定分类路径（如 '硕士论文'），"
+        "自动查重（本地库已有则跳过）、默认打 #来自Agent 标签（auto_tag=false 可关）、被引>1000 自动打 #🔥。"
+        "写入需要 ZOTERO_API_KEY 环境变量（Zotero Web API），未配置时工具会返回明确的配置指引。"
+        "严禁修改或删除 Zotero 中已有条目；仅新增。"
     ),
 )
 
@@ -217,6 +227,138 @@ def open_pdf_in_zotero(key_or_citekey: str) -> str:
     """在 Zotero 内置 PDF 阅读器中直接打开该文献的 PDF（zotero://open-pdf 跳转）。"""
     try:
         return _out(zc.open_pdf_in_zotero(key_or_citekey))
+    except ZoteroError as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------- 写入链路
+
+@mcp.tool()
+def add_paper_by_doi(doi: str, collection: str = "", auto_tag: bool = True) -> str:
+    """按 DOI 从 Crossref 自动抓取元数据，查重后写入 Zotero。
+
+    collection 指定分类路径（如 '硕士论文/CSS中的…'），不填则写入根目录。
+    auto_tag=True 时自动打 #来自Agent 和（被引>1000 时）#🔥。
+    写入需要 ZOTERO_API_KEY 环境变量（Zotero Web API），未配置会返回明确指引。
+    """
+    try:
+        return _out(zc.add_paper_by_doi(doi, collection=collection or None, auto_tag=auto_tag))
+    except ZoteroError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def add_paper_by_arxiv(arxiv_id: str, collection: str = "", auto_tag: bool = True) -> str:
+    """按 arXiv ID 抓取元数据（优先 DOI→Crossref，兜底 arXiv 自身），查重后写入 Zotero。
+
+    arxiv_id 可写 '2301.12345' 或 'arXiv:2301.12345'。
+    collection / auto_tag 同 add_paper_by_doi。
+    """
+    try:
+        return _out(zc.add_paper_by_arxiv(arxiv_id, collection=collection or None, auto_tag=auto_tag))
+    except ZoteroError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def add_book_by_isbn(isbn: str, collection: str = "", auto_tag: bool = True) -> str:
+    """按 ISBN 从 Open Library 自动抓取元数据，查重后写入 Zotero。
+
+    isbn 可带空格/短横线（如 '978-7-100-12345-6'），会自动归一化。
+    """
+    try:
+        return _out(zc.add_book_by_isbn(isbn, collection=collection or None, auto_tag=auto_tag))
+    except ZoteroError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def add_paper_by_title(title: str, collection: str = "", auto_tag: bool = True) -> str:
+    """按论文标题在 Crossref 自动搜索匹配最相关条目，查重后写入 Zotero。
+
+    标题越长匹配越准；返回结果带 citations 字段显示被引数。
+    """
+    try:
+        return _out(zc.add_paper_by_title(title, collection=collection or None, auto_tag=auto_tag))
+    except ZoteroError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def add_item(
+    title: str,
+    item_type: str = "journalArticle",
+    creators: str = "",
+    doi: str = "",
+    date: str = "",
+    collection: str = "",
+    auto_tag: bool = True,
+    extra_tags: str = "",
+    **kwargs,
+) -> str:
+    """通用写入：AI 直接提供条目元数据，查重后写入 Zotero。
+
+    适用于用户在对话里口述文献信息（如"把这个 PDF 作为论文条目加入…"）、
+    或 add_* 抓取失败后 AI 自行组装条目的场景。
+
+    creators 格式："姓 名, 姓 名" 或 "Last, First & Last, First"（英文）。
+    item_type 可选值：journalArticle / book / bookSection / conferencePaper / preprint /
+    thesis / report / dataset / letter / note / artwork 等。
+    extra_tags 逗号分隔，额外添加的标签。
+    """
+    # 解析 creators 字符串 → Zotero 格式
+    creator_list = []
+    if creators:
+        # 支持 "王弘睿, 张三" / "Last, First & Last, First"
+        import re as _re
+        for seg in _re.split(r"\s*&\s*|\s*;\s*|\s*,\s*(?=[^,]+$)", creators):
+            seg = seg.strip()
+            if not seg:
+                continue
+            parts = seg.split()
+            if "," in seg:
+                # "Last, First"
+                last, first = seg.split(",", 1)
+                creator_list.append({"firstName": first.strip(), "lastName": last.strip()})
+            elif len(parts) >= 2:
+                creator_list.append({"firstName": " ".join(parts[:-1]), "lastName": parts[-1]})
+            else:
+                creator_list.append({"lastName": seg})
+
+    payload = {
+        "itemType": item_type,
+        "title": title,
+        "creators": creator_list,
+    }
+    if doi:
+        payload["DOI"] = doi
+    if date:
+        payload["date"] = date
+    # kwargs 兜底（publicationTitle, url, abstractNote, publisher, ISBN, ...）
+    for k, v in kwargs.items():
+        if v is not None and v != "" and k in {
+            "publicationTitle", "url", "abstractNote", "publisher", "ISBN",
+            "extra", "edition", "volume", "issue", "pages", "series",
+            "seriesNumber", "place", "numPages", "language",
+        }:
+            payload[k] = v
+    extra = [t.strip() for t in extra_tags.split(",") if t.strip()] if extra_tags else []
+
+    try:
+        return _out(zc.add_item(payload, collection=collection or None,
+                                  auto_tag=auto_tag, extra_tags=extra))
+    except ZoteroError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def attach_pdf_to_item(pdf_path: str, item_key: str) -> str:
+    """将本地 PDF 文件上传为已有条目的子附件（imported_file 模式）。
+
+    item_key 传 8 位 item key（可先 get_item 拿到）。
+    """
+    try:
+        return _out(zc.attach_pdf_to_item(pdf_path, item_key))
     except ZoteroError as e:
         return _err(e)
 
