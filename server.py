@@ -14,6 +14,7 @@ Phase 2：写入链路（6 个工具）
 - 自动查重（本地库已有则跳过）、自动打 #来自Agent（可关）、被引>1000 打 #🔥
 - 写入走 Zotero Web API，需要 ZOTERO_API_KEY 环境变量
 - 严禁修改或删除已有条目；仅新增
+配套：install_picker_extension（从 GitHub 下载安装 Zotero Picker IDE 扩展）
 
 运行方式（stdio）：python server.py
 """
@@ -458,6 +459,129 @@ def update_item_meta(
             notes_mode=notes_mode,
         ))
     except ZoteroError as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------- 扩展安装
+
+@mcp.tool()
+def install_picker_extension(
+    repo: str = "leafbakkk/zotero-picker-vscode",
+    branch: str = "main",
+    ide: str = "auto",
+) -> str:
+    """从 GitHub 仓库下载配套的 Zotero Picker 扩展并安装到本机 IDE（Trae / VS Code）。
+
+    流程：下载仓库 zip → 解压到 IDE 扩展目录 → 注册进 extensions.json。
+    ide: 'auto'（默认，安装到所有检测到的 IDE）/ 'trae' / 'vscode'。
+    安装完成后需要重启 IDE 才能生效。
+    """
+    import io
+    import os
+    import shutil
+    import time
+    import urllib.request
+    import uuid as _uuid
+    import zipfile
+
+    try:
+        # 1. 下载 zip
+        zip_url = f"https://codeload.github.com/{repo}/zip/refs/heads/{branch}"
+        req = urllib.request.Request(zip_url, headers={"User-Agent": "zotero-trae-mcp"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            blob = r.read()
+        zf = zipfile.ZipFile(io.BytesIO(blob))
+
+        # 2. 读 package.json（zip 内顶层有一层 <repo>-<branch>/ 前缀）
+        names = zf.namelist()
+        prefix = names[0].split("/")[0] + "/"
+        pkg = json.loads(zf.read(prefix + "package.json").decode("utf-8"))
+        name, publisher, version = pkg["name"], pkg.get("publisher", "unknown"), pkg["version"]
+        ext_dirname = f"{publisher}.{name}-{version}"
+
+        # 3. 目标 IDE 扩展目录
+        home = os.path.expanduser("~")
+        candidates = {
+            "trae": os.path.join(home, ".trae-cn", "extensions"),
+            "vscode": os.path.join(home, ".vscode", "extensions"),
+        }
+        if ide == "auto":
+            targets = [p for p in candidates.values() if os.path.isdir(p)]
+            if not targets:
+                targets = [candidates["trae"]]
+        elif ide in candidates:
+            targets = [candidates[ide]]
+        else:
+            return _err(ValueError(f"ide 参数无效：{ide}（可选 auto / trae / vscode）"))
+
+        installed = []
+        for ext_root in targets:
+            os.makedirs(ext_root, exist_ok=True)
+            # 清理同扩展的旧版本目录
+            for d in os.listdir(ext_root):
+                if d.startswith(f"{publisher}.{name}-") and d != ext_dirname:
+                    shutil.rmtree(os.path.join(ext_root, d), ignore_errors=True)
+            dest = os.path.join(ext_root, ext_dirname)
+            shutil.rmtree(dest, ignore_errors=True)
+            os.makedirs(dest, exist_ok=True)
+            # 4. 解压（剥掉顶层前缀）
+            for member in names:
+                if not member.startswith(prefix) or member == prefix:
+                    continue
+                rel = member[len(prefix):]
+                if not rel:
+                    continue
+                target_path = os.path.join(dest, rel)
+                if member.endswith("/"):
+                    os.makedirs(target_path, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with zf.open(member) as src, open(target_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+
+            # 5. 注册 extensions.json
+            reg_path = os.path.join(ext_root, "extensions.json")
+            registry = []
+            if os.path.isfile(reg_path):
+                try:
+                    with open(reg_path, "r", encoding="utf-8") as f:
+                        registry = json.load(f)
+                except Exception:  # noqa: BLE001
+                    registry = []
+            ext_id = f"{publisher}.{name}".lower()
+            registry = [e for e in registry
+                        if e.get("identifier", {}).get("id", "").lower() != ext_id]
+            registry.append({
+                "identifier": {"id": ext_id, "uuid": str(_uuid.uuid4())},
+                "version": version,
+                "location": {"$mid": 1, "path": dest, "scheme": "file"},
+                "relativeLocation": ext_dirname,
+                "metadata": {
+                    "installedTimestamp": int(time.time() * 1000),
+                    "pinned": False,
+                    "source": "gallery",
+                    "publisherDisplayName": publisher,
+                    "targetPlatform": "undefined",
+                    "updated": False,
+                    "private": False,
+                    "isPreReleaseVersion": False,
+                    "hasPreReleaseVersion": False,
+                },
+            })
+            with open(reg_path, "w", encoding="utf-8") as f:
+                json.dump(registry, f, ensure_ascii=False)
+            installed.append({"ide_root": ext_root, "path": dest})
+
+        return _out({
+            "installed": True,
+            "extension": ext_dirname,
+            "version": version,
+            "source": f"https://github.com/{repo}（{branch} 分支）",
+            "targets": installed,
+            "instruction": "安装完成。请完全退出并重启 IDE，然后通过命令面板（Cmd+Shift+P）"
+                           "执行「Zotero Picker: 打开文献选择器」验证扩展是否加载。",
+        })
+    except Exception as e:  # noqa: BLE001
         return _err(e)
 
 

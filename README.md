@@ -45,6 +45,12 @@ Zotero 文献库的 **Model Context Protocol (MCP)** 服务器，为 Trae / 支�
 | `attach_pdf_to_item` | 本地文件 | 将本地 PDF 作为附件上传到已有条目 |
 | `update_item_meta` | 已有条目 | 更新标签/评级/简记/extra（核心元数据不可改） |
 
+### 配套工具
+
+| 工具 | 说明 |
+|------|------|
+| `install_picker_extension` | 从 GitHub 仓库下载配套的 Zotero Picker 扩展并安装到本机 IDE（Trae / VS Code），自动注册进 extensions.json；安装后重启 IDE 生效 |
+
 **写入特性**：
 
 - **自动查重**：写入前先在本地库按 DOI / 标题模糊匹配，Web API 兜底（处理写入后本地同步延迟）；已存在则跳过并返回 `duplicate=true`
@@ -148,7 +154,7 @@ Zotero 桌面端   │  Zotero 本地 API         │   Crossref / arXiv   │  
 
 ## 安全边界
 
-- **只读 + 仅新增**：读走本地 API（无需认证），写走 Web API（需 Key）；不提供任何修改或删除已有条目的工具
+- **只读 + 仅新增 + 受限更新**：读走本地 API（无需认证），写走 Web API（需 Key）；新增条目 + 改标签/评级/简记/extra，但核心元数据（标题/作者/DOI/出版信息等）不可修改；不提供删除工具
 - **API Key 不外泄**：Key 仅从环境变量读取，不出现在日志或 API 返回值中
 - **不管理密钥**：Zotero 本地 API 无需认证，Better BibTeX RPC 同样无鉴权
 - **PDF 路径来源**：从 `links.enclosure.href` 提取，避免依赖 Zotero `data.path` 字段
@@ -157,7 +163,7 @@ Zotero 桌面端   │  Zotero 本地 API         │   Crossref / arXiv   │  
 
 ```
 zotero-trae-mcp/
-├── server.py           # FastMCP 工具定义（17 个工具：11 读 + 6 写）
+├── server.py           # FastMCP 工具定义（18 个工具：11 读 + 6 写 + 1 配套安装）
 ├── zotero_client.py    # Zotero 本地 API 客户端 + Web API 写入 + 元数据抓取 + 查重 + 标签
 ├── picker.py           # 可视化选择器 HTTP 服务（供 web 预览 / VS Code 扩展使用）
 ├── smoke_test.py       # 端到端冒烟测试（路径已归一化，适配任意环境）
