@@ -1,8 +1,6 @@
 # zotero-trae-mcp
 
-Zotero 文献库的 **Model Context Protocol (MCP)** 服务器，为 Trae / 支持 MCP 的 AI 客户端提供对 Zotero 桌面端的读 + 写访问。
-
-附带一个 IDE 面板扩展 [zotero-picker-vscode](https://github.com/leafbakkk/zotero-picker-vscode)，可在编辑器侧边栏以面板形式完成文献搜索与勾选；同时内置 `install_picker_extension` 工具，可由 AI 自动完成该扩展的下载与安装。
+附带 IDE 面板扩展 [zotero-picker-vscode](https://github.com/leafbakkk/zotero-picker-vscode)的Zotero MCP，可在编辑器侧边栏以面板形式完成文献搜索与勾选；同时内置 `install_picker_extension` 工具，可由 AI 自动完成该扩展的下载与安装。
 
 ## 功能特点
 
